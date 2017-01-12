@@ -1,12 +1,15 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
-using System.Web;
+using System.Web.Hosting;
 using System.Web.Mvc;
 using System.Web.Routing;
+using Ploeh.Samples.Booking.DomainModel;
+using Ploeh.Samples.Booking.JsonAntiCorruption;
+using Ploeh.Samples.Booking.Persistence.FileSystem;
+using Ploeh.Samples.Booking.PersistenceModel;
 using Ploeh.Samples.Booking.WebModel;
-using Castle.Windsor;
-using Ploeh.Samples.Booking.WebUI.Windsor;
 
 namespace Ploeh.Samples.Booking.WebUI
 {
@@ -15,13 +18,6 @@ namespace Ploeh.Samples.Booking.WebUI
 
     public class MvcApplication : System.Web.HttpApplication
     {
-        private readonly IWindsorContainer container;
-
-        public MvcApplication()
-        {
-            this.container = new WindsorContainer().Install(new WebWindsorInstaller());
-        }
-
         public static void RegisterGlobalFilters(GlobalFilterCollection filters)
         {
             filters.Add(new HandleErrorAttribute());
@@ -53,13 +49,39 @@ namespace Ploeh.Samples.Booking.WebUI
             RegisterGlobalFilters(GlobalFilters.Filters);
             RegisterRoutes(RouteTable.Routes);
 
-            ControllerBuilder.Current.SetControllerFactory(new WindsorCompositionRoot(this.container));
+            ControllerBuilder.Current.SetControllerFactory(new CompositionRoot());
         }
 
-        public override void Dispose()
+        private class CompositionRoot : DefaultControllerFactory
         {
-            this.container.Dispose();
-            base.Dispose();
+            private static readonly Dictionary<Type, Func<IController>> controllers = new[] {
+                GetControllerTuple(() => new HomeController(FileMonthViewStore)),
+                GetControllerTuple(() => new BookingController(JsonCapacityRepository, Channel<RequestReservationCommand>())),
+                GetControllerTuple(() => new DisabledDatesController(FileMonthViewStore))
+            }.ToDictionary(_ => _.Item1, _ => _.Item2);
+
+            private static FileDateStore FileDateStore => new FileDateStore(SsotDirectory, Extension);
+            private static JsonCapacityRepository JsonCapacityRepository => new JsonCapacityRepository(FileDateStore, FileDateStore, Quickenings);
+            private static IChannel<T> Channel<T>() where T : IMessage => new JsonChannel<T>(StoreWriter<T>());
+            private static IStoreWriter<T> StoreWriter<T>() where T : IMessage => new FileQueueWriter<T>(QueueDirectory, Extension);
+            private static FileMonthViewStore FileMonthViewStore => new FileMonthViewStore(ViewStoreDirectory, Extension);
+            private static string Extension => "txt";
+            private static DirectoryInfo ViewStoreDirectory => new DirectoryInfo(HostingEnvironment.MapPath("~/Queue")).CreateIfAbsent();
+            private static DirectoryInfo QueueDirectory => new DirectoryInfo(HostingEnvironment.MapPath("~/Queue")).CreateIfAbsent();
+            private static DirectoryInfo SsotDirectory => new DirectoryInfo(HostingEnvironment.MapPath("~/SSoT")).CreateIfAbsent();
+            private static IQuickening[] Quickenings => new IQuickening[] {
+                new CapacityReservedEvent.Quickening(),
+                new RequestReservationCommand.Quickening(),
+                new ReservationAcceptedEvent.Quickening(),
+                new ReservationRejectedEvent.Quickening(),
+                new SoldOutEvent.Quickening()
+            };
+
+            protected override IController GetControllerInstance(RequestContext requestContext, Type controllerType)
+                => controllers[controllerType]();
+
+            public static Tuple<Type, Func<IController>> GetControllerTuple<T>(Func<T> func) where T : IController
+                => Tuple.Create<Type, Func<IController>>(typeof (T), () => func());
         }
     }
 }
